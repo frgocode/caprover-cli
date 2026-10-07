@@ -155,7 +155,14 @@ export default class ServerSetup extends Command {
                 { name: 'DNS-01 (Cloudflare)', value: 'dns-01' }
             ],
             message: 'ACME challenge method for HTTPS certificates',
-            default: 'http-01',
+            // Resolved at prompt time only: a static default here would be
+            // injected by Commander into opts() for no-arg invocations and
+            // getParams would then treat it as user input, skipping the ACME
+            // prompt and applying the root domain before any challenge
+            // selection. `params && ...` keeps the inquirer default while
+            // leaving the Commander default undefined (same idiom as the
+            // assumeYes/IP/machine-name options above).
+            default: params && 'http-01',
             validate: (value: string) =>
                 value === 'http-01' || value === 'dns-01'
                     ? true

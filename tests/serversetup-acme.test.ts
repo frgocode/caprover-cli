@@ -76,7 +76,14 @@ describe('serversetup ACME DNS-01 flow', () => {
         const challenge: any = byName.acmeChallenge
 
         expect(await challenge.when()).toBe(true)
-        expect(challenge.default).toBe('http-01')
+        // Build-time (Commander registration) must carry no default, or
+        // Commander injects it into opts() and getParams skips the prompt.
+        expect(challenge.default).toBe(undefined)
+        // Prompt-time options (params present) still default to http-01.
+        const promptTime: any = ((cmd as any).options as (
+            params?: any
+        ) => any[])({}).find((o: any) => o.name === 'acmeChallenge')
+        expect(promptTime.default).toBe('http-01')
         expect(challenge.type).toBe('list')
         expect(challenge.validate('bogus')).not.toBe(true)
         expect(challenge.validate('http-01')).toBe(true)
