@@ -1,11 +1,17 @@
 import ServerSetup from '../src/commands/serversetup'
 import StdOutUtil from '../src/utils/StdOutUtil'
+import { ParamType } from '../src/commands/Command'
+import { Command as CommanderStatic } from 'commander'
 
 const mockApi = {
     getAcmeConfig: jest.fn(),
     setCloudflareToken: jest.fn(),
     updateAcmeConfig: jest.fn(),
-    updateRootDomain: jest.fn()
+    updateRootDomain: jest.fn(),
+    enableRootSsl: jest.fn(),
+    forceSsl: jest.fn(),
+    getAuthToken: jest.fn(),
+    getCaptainInfo: jest.fn()
 }
 
 jest.mock('../src/api/CliApiManager', () => ({
@@ -15,7 +21,17 @@ jest.mock('../src/api/CliApiManager', () => ({
     }
 }))
 
+const mockInquirerPrompt = jest.fn()
+
+jest.mock('inquirer', () => ({
+    __esModule: true,
+    default: {
+        prompt: (...args: any[]) => mockInquirerPrompt(...args)
+    }
+}))
+
 const TOKEN = 'cf-test-token-value'
+
 
 function buildOptions() {
     const cmd = new ServerSetup({} as any)
@@ -38,10 +54,21 @@ describe('serversetup ACME DNS-01 flow', () => {
         mockApi.setCloudflareToken.mockResolvedValue(undefined)
         mockApi.updateAcmeConfig.mockResolvedValue(undefined)
         mockApi.updateRootDomain.mockResolvedValue(undefined)
+        mockApi.enableRootSsl.mockResolvedValue(undefined)
+        mockApi.forceSsl.mockResolvedValue(undefined)
+        mockApi.getAuthToken.mockResolvedValue('test-auth-token')
+        mockApi.getCaptainInfo.mockResolvedValue({})
     })
 
     afterEach(() => {
         jest.restoreAllMocks()
+        delete process.env.CAPROVER_IP
+        delete process.env.CAPROVER_PASSWORD
+        delete process.env.CAPROVER_ROOT_DOMAIN
+        delete process.env.CAPROVER_ACME_CHALLENGE
+        delete process.env.CAPROVER_CLOUDFLARE_API_TOKEN
+        delete process.env.CAPROVER_CERTIFICATE_EMAIL
+        delete process.env.CAPROVER_NAME
     })
 
     test('challenge prompt is asked on fresh setup with http-01 default', async () => {
@@ -223,5 +250,87 @@ describe('serversetup ACME DNS-01 flow', () => {
         expect(logs.some((line) => line.includes(TOKEN))).toBe(false)
         logSpy.mockRestore()
         errorSpy.mockRestore()
+    })
+
+    test('token option is masked, env-driven and hidden from argv', () => {
+        const { byName } = buildOptions()
+        const tokenOption: any = byName.cloudflareApiToken
+
+        expect(tokenOption.type).toBe('password')
+        expect(tokenOption.env).toBe('CAPROVER_CLOUDFLARE_API_TOKEN')
+        expect(tokenOption.hide).toBe(true)
+        expect(tokenOption.char).toBeUndefined()
+    })
+
+    test('serversetup help does not advertise token argv usage', () => {
+        const program = new CommanderStatic()
+        new ServerSetup(program as any).build()
+        const subcommand = program.commands.find(
+            (entry: any) =>
+                entry.name() === 'serversetup' || entry.alias() === 'setup'
+        )
+        if (!subcommand) {
+            throw new Error('serversetup subcommand was not registered')
+        }
+        const help = subcommand.helpInformation()
+
+        expect(help).not.toContain('--cloudflareApiToken')
+        expect(help).not.toContain('-t,')
+        expect(help).toContain('--acmeChallenge')
+        expect(help).toContain('CAPROVER_ACME_CHALLENGE')
+    })
+
+    test('CAPROVER_CLOUDFLARE_API_TOKEN resolves end to end without prompting', async () => {
+        process.env.CAPROVER_IP = '1.2.3.4'
+        process.env.CAPROVER_PASSWORD = 'current-pass'
+        process.env.CAPROVER_ROOT_DOMAIN = 'example.com'
+        process.env.CAPROVER_ACME_CHALLENGE = 'dns-01'
+        process.env.CAPROVER_CLOUDFLARE_API_TOKEN = 'env-token-xyz'
+        process.env.CAPROVER_CERTIFICATE_EMAIL = 'admin@example.com'
+        process.env.CAPROVER_NAME = 'testmachine'
+        mockInquirerPrompt.mockImplementation(async (questions: any[]) => {
+            const name = questions && questions[0] && questions[0].name
+            if (name === 'assumeYes') {
+                return { assumeYes: true }
+            }
+            throw new Error(`unexpected prompt for ${name}`)
+        })
+
+        const cmd = new ServerSetup({} as any)
+        const definitions: any[] = (cmd as any).options()
+        const aliases = definitions
+            .filter((option: any) => option && option.name)
+            .reduce(
+                (acc: any[], option: any) => [
+                    ...acc,
+                    { ...option, aliasTo: option.name },
+                    ...((option.aliases || [])
+                        .filter((alias: any) => alias && alias.name)
+                        .map((alias: any) => ({
+                            ...alias,
+                            aliasTo: option.name
+                        })))
+                ],
+                []
+            )
+        const params = await (cmd as any).getParams({}, aliases)
+
+        expect(params.cloudflareApiToken.value).toBe('env-token-xyz')
+        expect(params.cloudflareApiToken.from).toBe(ParamType.Env)
+        const prompted = mockInquirerPrompt.mock.calls.map(
+            (call) => call[0] && call[0][0] && call[0][0].name
+        )
+        expect(prompted).not.toContain('cloudflareApiToken')
+        expect(mockApi.setCloudflareToken).toHaveBeenCalledWith(
+            'env-token-xyz'
+        )
+        expect(mockApi.updateAcmeConfig).toHaveBeenCalledWith(
+            'dns-01',
+            'cloudflare'
+        )
+        expect(mockApi.updateRootDomain).toHaveBeenCalledWith('example.com')
+        expect(mockApi.enableRootSsl).toHaveBeenCalledWith(
+            'admin@example.com'
+        )
     })
 })

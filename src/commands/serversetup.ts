@@ -178,9 +178,14 @@ export default class ServerSetup extends Command {
             }
         },
         {
+            // Accepted from the CAPROVER_CLOUDFLARE_API_TOKEN environment
+            // variable or a masked interactive prompt. There is
+            // intentionally no advertised argv flag: hidden options get no
+            // Commander flag (and no -t shortcut), while env handling in
+            // getParams works independently of help visibility.
             name: K.cfToken,
-            char: 't',
             env: 'CAPROVER_CLOUDFLARE_API_TOKEN',
+            hide: true,
             type: 'password',
             message: 'Cloudflare API token',
             when: () =>
