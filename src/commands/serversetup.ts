@@ -26,6 +26,8 @@ import Command, {
 const K = Utils.extendCommonKeys({
     ip: 'caproverIP',
     root: 'caproverRootDomain',
+    acme: 'acmeChallenge',
+    cfToken: 'cloudflareApiToken',
     newPwd: 'newPassword',
     newPwdCheck: 'newPasswordCheck',
     email: 'certificateEmail'
@@ -44,6 +46,17 @@ export default class ServerSetup extends Command {
     private ip: string
 
     private password: string = Constants.DEFAULT_PASSWORD
+
+    private pendingRootDomain: string | undefined
+
+    private selectedAcmeChallenge: string | undefined
+
+    private existingAcme:
+        | {
+              challengeType?: string
+              cloudflareTokenConfigured?: boolean
+          }
+        | undefined
 
     protected options = (params?: IParams): IOption[] => [
         this.getDefaultConfigFileOption(() => this.preQuestions(params!)),
@@ -124,8 +137,115 @@ export default class ServerSetup extends Command {
                     ? true
                     : // tslint:disable-next-line: max-line-length
                       'Please enter a valid root domain, for example use "test.yourdomain.com" if you setup your DNS to point "*.test.yourdomain.com" to the ip address of your server.',
-            preProcessParam: async (param: IParam) =>
-                await this.updateRootDomain(param.value)
+            preProcessParam: async (param: IParam) => {
+                // Collect only: the domain is applied later, after the ACME
+                // challenge is known, so persisted DNS-01 can skip the HTTP
+                // verification that changerootdomain would otherwise require.
+                this.pendingRootDomain = param.value
+                this.existingAcme = await this.fetchCurrentAcmeConfig()
+            }
+        },
+        {
+            name: K.acme,
+            char: 'a',
+            env: 'CAPROVER_ACME_CHALLENGE',
+            type: 'list',
+            choices: [
+                { name: 'HTTP-01 (default)', value: 'http-01' },
+                { name: 'DNS-01 (Cloudflare)', value: 'dns-01' }
+            ],
+            message: 'ACME challenge method for HTTPS certificates',
+            default: 'http-01',
+            validate: (value: string) =>
+                value === 'http-01' || value === 'dns-01'
+                    ? true
+                    : 'ACME challenge must be either http-01 or dns-01.',
+            when: () => this.existingAcme?.challengeType !== 'dns-01',
+            preProcessParam: async (param?: IParam) => {
+                // Record only: persisting happens in order with the token
+                // (when present) in applyPendingRootDomain below, so a
+                // stored token always precedes the DNS-01 config update.
+                if (param && param.value) {
+                    this.selectedAcmeChallenge = param.value
+                } else if (
+                    this.existingAcme &&
+                    this.existingAcme.challengeType === 'dns-01'
+                ) {
+                    this.selectedAcmeChallenge = 'dns-01'
+                } else {
+                    this.selectedAcmeChallenge = 'http-01'
+                }
+            }
+        },
+        {
+            name: K.cfToken,
+            char: 't',
+            env: 'CAPROVER_CLOUDFLARE_API_TOKEN',
+            type: 'password',
+            message: 'Cloudflare API token',
+            when: () =>
+                this.selectedAcmeChallenge === 'dns-01' &&
+                !this.existingAcme?.cloudflareTokenConfigured,
+            validate: (token: string) =>
+                token && token.trim()
+                    ? true
+                    : 'Cloudflare API token cannot be empty.',
+            preProcessParam: async (param?: IParam) => {
+                if (param && param.value) {
+                    try {
+                        await this.api().setCloudflareToken(
+                            (param.value + '').trim()
+                        )
+                    } catch (e) {
+                        StdOutUtil.printError(
+                            '\nFailed to store the Cloudflare API token. DNS-01 was not activated and the root domain was not changed.\n',
+                            true
+                        )
+                        return
+                    }
+                }
+            }
+        },
+        {
+            // Internal ordering step, not user input: persists the selected
+            // ACME configuration (DNS-01 only after its token is stored)
+            // and then applies the collected root domain, so persisted
+            // DNS-01 is already in effect when changerootdomain runs.
+            name: 'applyPendingRootDomain',
+            hide: true,
+            when: () => false,
+            preProcessParam: async () => {
+                if (
+                    this.selectedAcmeChallenge === 'dns-01' &&
+                    this.existingAcme?.challengeType !== 'dns-01'
+                ) {
+                    try {
+                        await this.api().updateAcmeConfig(
+                            'dns-01',
+                            'cloudflare'
+                        )
+                    } catch (e) {
+                        StdOutUtil.printError(
+                            '\nCloudflare token was stored, but DNS-01 activation was not completed. Rerunning setup is safe and the token does not need to be entered again.\n',
+                            true
+                        )
+                        return
+                    }
+                } else if (
+                    this.selectedAcmeChallenge === 'http-01' &&
+                    this.existingAcme?.challengeType === 'dns-01'
+                ) {
+                    // Explicit switch back: persist HTTP-01 first. The stored
+                    // Cloudflare token is intentionally left untouched.
+                    await this.api().updateAcmeConfig('http-01')
+                }
+
+                const domain = this.pendingRootDomain
+                this.pendingRootDomain = undefined
+                if (domain) {
+                    await this.updateRootDomain(domain)
+                }
+            }
         },
         {
             name: K.newPwd,
@@ -186,6 +306,31 @@ export default class ServerSetup extends Command {
     ): Promise<ICommandLineOptions> {
         StdOutUtil.printMessage('Setup CapRover machine on your server...\n')
         return Promise.resolve(cmdLineoptions)
+    }
+
+    private api() {
+        return CliApiManager.get({
+            authToken: this.machine.authToken,
+            baseUrl: `http://${this.ip}:${Constants.SETUP_PORT}`,
+            name: ''
+        })
+    }
+
+    private async fetchCurrentAcmeConfig(): Promise<
+        | {
+              challengeType?: string
+              cloudflareTokenConfigured?: boolean
+          }
+        | undefined
+    > {
+        // Best effort only: older backends lack this endpoint, and any
+        // failure simply falls back to fresh-setup defaults. Later steps
+        // fail loudly on their own if the server is unreachable.
+        try {
+            return await this.api().getAcmeConfig()
+        } catch (e) {
+            return undefined
+        }
     }
 
     protected preQuestions(params: IParams) {

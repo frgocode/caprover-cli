@@ -119,6 +119,43 @@ export default class ApiManager {
             .then(http.fetch(http.POST, '/user/system/forcessl', { isEnabled }))
     }
 
+    getAcmeConfig(): Promise<{
+        challengeType: string
+        dnsProvider?: string
+        cloudflareTokenConfigured: boolean
+    }> {
+        const http = this.http
+
+        return Promise.resolve() //
+            .then(http.fetch(http.GET, '/user/system/acmeconfig', {}))
+    }
+
+    setCloudflareToken(token: string): Promise<void> {
+        const http = this.http
+
+        return Promise.resolve() //
+            .then(
+                http.fetch(http.POST, '/user/system/acmeconfig/cloudflare', {
+                    token
+                })
+            )
+    }
+
+    updateAcmeConfig(
+        challengeType: string,
+        dnsProvider?: string
+    ): Promise<void> {
+        const http = this.http
+
+        return Promise.resolve() //
+            .then(
+                http.fetch(http.POST, '/user/system/acmeconfig', {
+                    challengeType,
+                    dnsProvider
+                })
+            )
+    }
+
     getAllApps() {
         const http = this.http
 
